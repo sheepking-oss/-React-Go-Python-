@@ -1,12 +1,56 @@
 import os
 import subprocess
 import json
+import glob
 from typing import Dict, Any, List, Optional
 
 
 class Transcoder:
     def __init__(self, ffmpeg_path: str = "ffmpeg"):
         self.ffmpeg_path = ffmpeg_path
+
+    def _cleanup_output_files(self, output_path: str, template: Dict[str, Any]) -> None:
+        if not output_path:
+            return
+
+        output_dir = os.path.dirname(output_path)
+        base_name = os.path.splitext(os.path.basename(output_path))[0]
+
+        output_settings = template.get("output", {})
+        files_to_clean = []
+
+        files_to_clean.append(output_path)
+
+        if output_settings.get("format") == "hls" or output_settings.get("generate_hls"):
+            m3u8_path = os.path.join(output_dir, f"{base_name}.m3u8")
+            files_to_clean.append(m3u8_path)
+
+            ts_pattern = os.path.join(output_dir, f"{base_name}_*.ts")
+            ts_files = glob.glob(ts_pattern)
+            files_to_clean.extend(ts_files)
+
+        thumbnail_path = os.path.join(output_dir, f"{base_name}_thumb.jpg")
+        files_to_clean.append(thumbnail_path)
+
+        tmp_pattern = os.path.join(output_dir, "*.tmp")
+        tmp_files = glob.glob(tmp_pattern)
+        files_to_clean.extend(tmp_files)
+
+        part_pattern = os.path.join(output_dir, "*.part")
+        part_files = glob.glob(part_pattern)
+        files_to_clean.extend(part_files)
+
+        ffmpeg_tmp_pattern = os.path.join(output_dir, ".ffmpeg-*")
+        ffmpeg_tmp_files = glob.glob(ffmpeg_tmp_pattern)
+        files_to_clean.extend(ffmpeg_tmp_files)
+
+        for file_path in files_to_clean:
+            if file_path and os.path.exists(file_path):
+                try:
+                    if os.path.isfile(file_path):
+                        os.remove(file_path)
+                except Exception:
+                    pass
 
     def transcode(
         self,
@@ -56,12 +100,23 @@ class Transcoder:
             process.wait()
 
             if process.returncode != 0:
+                self._cleanup_output_files(output_path, template)
                 raise RuntimeError(f"FFmpeg transcoding failed with code {process.returncode}")
 
-            if not os.path.exists(output_path):
+            main_output_exists = os.path.exists(output_path)
+            hls_output_exists = True
+            if output_settings.get("format") == "hls" or output_settings.get("generate_hls"):
+                base_name = os.path.splitext(os.path.basename(output_path))[0]
+                m3u8_path = os.path.join(output_dir, f"{base_name}.m3u8")
+                hls_output_exists = os.path.exists(m3u8_path)
+
+            if not main_output_exists and not hls_output_exists:
+                self._cleanup_output_files(output_path, template)
                 raise RuntimeError("Output file was not generated")
 
-            output_size = os.path.getsize(output_path)
+            output_size = 0
+            if os.path.exists(output_path):
+                output_size = os.path.getsize(output_path)
 
             return {
                 "success": True,
@@ -70,11 +125,7 @@ class Transcoder:
             }
 
         except Exception as e:
-            if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
+            self._cleanup_output_files(output_path, template)
             raise e
 
     def _build_ffmpeg_command(

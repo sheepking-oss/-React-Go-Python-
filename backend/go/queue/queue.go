@@ -173,14 +173,29 @@ func (q *TaskQueue) runTranscode(ctx context.Context, task *models.Task) error {
 
 	inputPath := resource.Path
 	outputDir := q.config.Storage.OutputDir
+	taskOutputDir := filepath.Join(outputDir, task.ID)
 	outputFileName := resource.Name
 	if ext := filepath.Ext(outputFileName); ext != "" {
 		outputFileName = outputFileName[:len(outputFileName)-len(ext)]
 	}
 	outputFileName += "." + template.Output.Format
-	outputPath := filepath.Join(outputDir, task.ID, outputFileName)
+	outputPath := filepath.Join(taskOutputDir, outputFileName)
 
-	os.MkdirAll(filepath.Dir(outputPath), 0755)
+	if task.RetryCount > 0 {
+		q.logTask(task, "info", "Retrying task, cleaning up previous files", map[string]string{
+			"retry_count": string(rune(task.RetryCount)),
+			"task_output_dir": taskOutputDir,
+		})
+		if err := q.cleanupTaskFiles(task, taskOutputDir, outputFileName, template); err != nil {
+			q.logTask(task, "warning", "Failed to cleanup previous files, continuing anyway", map[string]string{
+				"error": err.Error(),
+			})
+		} else {
+			q.logTask(task, "info", "Successfully cleaned up previous task files", nil)
+		}
+	}
+
+	os.MkdirAll(taskOutputDir, 0755)
 
 	payload := map[string]interface{}{
 		"task_id":     task.ID,
@@ -314,6 +329,14 @@ func (q *TaskQueue) RetryTask(taskID string) error {
 		}
 	}
 
+	if err := q.forceCleanupTask(taskID); err != nil {
+		q.logTask(task, "warning", "Failed to cleanup task files during manual retry", map[string]string{
+			"error": err.Error(),
+		})
+	} else {
+		q.logTask(task, "info", "Cleaned up previous files for manual retry", nil)
+	}
+
 	task.Status = models.TaskStatusPending
 	task.Progress = 0
 	task.ErrorMessage = ""
@@ -401,4 +424,87 @@ type InvalidStatusError struct {
 
 func (e *InvalidStatusError) Error() string {
 	return "invalid task status: expected " + e.Expected + ", got " + e.Actual
+}
+
+func (q *TaskQueue) cleanupTaskFiles(
+	task *models.Task,
+	taskOutputDir string,
+	outputFileName string,
+	template *models.TranscodeTemplate,
+) error {
+	if _, err := os.Stat(taskOutputDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	baseName := outputFileName
+	if ext := filepath.Ext(baseName); ext != "" {
+		baseName = baseName[:len(baseName)-len(ext)]
+	}
+
+	var filesToClean []string
+
+	mainOutputPath := filepath.Join(taskOutputDir, outputFileName)
+	filesToClean = append(filesToClean, mainOutputPath)
+
+	if template.Output.Format == "hls" || template.Output.GenerateHLS {
+		m3u8Path := filepath.Join(taskOutputDir, baseName+".m3u8")
+		filesToClean = append(filesToClean, m3u8Path)
+
+		tsFiles, _ := filepath.Glob(filepath.Join(taskOutputDir, baseName+"_*.ts"))
+		filesToClean = append(filesToClean, tsFiles...)
+	}
+
+	thumbnailPath := filepath.Join(taskOutputDir, baseName+"_thumb.jpg")
+	filesToClean = append(filesToClean, thumbnailPath)
+
+	partialFiles, _ := filepath.Glob(filepath.Join(taskOutputDir, "*.tmp"))
+	filesToClean = append(filesToClean, partialFiles...)
+	partialFiles2, _ := filepath.Glob(filepath.Join(taskOutputDir, "*.part"))
+	filesToClean = append(filesToClean, partialFiles2...)
+
+	tempPayloadPath := filepath.Join(q.config.Transcoder.TempDir, task.ID+".json")
+	filesToClean = append(filesToClean, tempPayloadPath)
+
+	cleanedCount := 0
+	for _, filePath := range filesToClean {
+		if filePath == "" {
+			continue
+		}
+		if _, err := os.Stat(filePath); err == nil {
+			if err := os.Remove(filePath); err == nil {
+				cleanedCount++
+				q.logger.Debug("Cleaned up file", zap.String("task_id", task.ID), zap.String("file", filePath))
+			} else {
+				q.logger.Warn("Failed to cleanup file", zap.String("task_id", task.ID), zap.String("file", filePath), zap.Error(err))
+			}
+		}
+	}
+
+	if cleanedCount > 0 {
+		q.logger.Info("Cleaned up task files", zap.String("task_id", task.ID), zap.Int("files_cleaned", cleanedCount))
+	}
+
+	return nil
+}
+
+func (q *TaskQueue) forceCleanupTask(taskID string) error {
+	task, err := q.store.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+
+	outputDir := q.config.Storage.OutputDir
+	taskOutputDir := filepath.Join(outputDir, taskID)
+
+	if template, err := q.store.GetTemplate(task.TemplateID); err == nil {
+		outputFileName := task.ResourceName
+		if ext := filepath.Ext(outputFileName); ext != "" {
+			outputFileName = outputFileName[:len(outputFileName)-len(ext)]
+		}
+		outputFileName += "." + template.Output.Format
+
+		return q.cleanupTaskFiles(task, taskOutputDir, outputFileName, template)
+	}
+
+	return nil
 }

@@ -10,14 +10,36 @@ import (
 type TaskStatus string
 
 const (
-	TaskStatusPending    TaskStatus = "pending"
-	TaskStatusQueued     TaskStatus = "queued"
-	TaskStatusProcessing TaskStatus = "processing"
-	TaskStatusCompleted  TaskStatus = "completed"
-	TaskStatusFailed     TaskStatus = "failed"
-	TaskStatusRetrying   TaskStatus = "retrying"
-	TaskStatusCancelled  TaskStatus = "cancelled"
+	TaskStatusPending      TaskStatus = "pending"
+	TaskStatusQueued       TaskStatus = "queued"
+	TaskStatusProcessing   TaskStatus = "processing"
+	TaskStatusCompleted    TaskStatus = "completed"
+	TaskStatusFailed       TaskStatus = "failed"
+	TaskStatusRetrying     TaskStatus = "retrying"
+	TaskStatusCancelled    TaskStatus = "cancelled"
+	TaskStatusUploadFailed TaskStatus = "upload_failed"
 )
+
+type UploadErrorCode string
+
+const (
+	UploadErrorCodeInvalidType    UploadErrorCode = "invalid_type"
+	UploadErrorCodeFileTooLarge   UploadErrorCode = "file_too_large"
+	UploadErrorCodeFileTooSmall   UploadErrorCode = "file_too_small"
+	UploadErrorCodeReadError      UploadErrorCode = "read_error"
+	UploadErrorCodeSaveError      UploadErrorCode = "save_error"
+	UploadErrorCodeInternalError  UploadErrorCode = "internal_error"
+)
+
+type FileUploadResult struct {
+	FileName    string          `json:"file_name"`
+	FileSize    int64           `json:"file_size"`
+	Success     bool            `json:"success"`
+	ResourceID  string          `json:"resource_id,omitempty"`
+	TaskID      string          `json:"task_id,omitempty"`
+	ErrorCode   UploadErrorCode `json:"error_code,omitempty"`
+	ErrorMessage string         `json:"error_message,omitempty"`
+}
 
 type TaskPriority int
 
@@ -149,6 +171,39 @@ func NewTask(resourceID, resourceName string, template *TranscodeTemplate) *Task
 		Metadata:     make(map[string]string),
 		CreatedAt:    time.Now(),
 		UpdatedAt:    time.Now(),
+	}
+}
+
+func NewFailedUploadTask(
+	fileName string,
+	errorCode UploadErrorCode,
+	errorMessage string,
+	template *TranscodeTemplate,
+) *Task {
+	now := time.Now()
+	return &Task{
+		ID:              uuid.New().String(),
+		ResourceID:      "",
+		ResourceName:    fileName,
+		TemplateID:      template.ID,
+		TemplateName:    template.Name,
+		Status:          TaskStatusUploadFailed,
+		Priority:        TaskPriorityNormal,
+		Progress:        0,
+		ProgressMessage: "",
+		RetryCount:      0,
+		MaxRetries:      0,
+		ErrorMessage:    errorMessage,
+		ErrorDetails:    string(errorCode),
+		StartedAt:       &now,
+		CompletedAt:     &now,
+		DurationSeconds: 0,
+		Metadata: map[string]string{
+			"error_code": string(errorCode),
+			"file_name":  fileName,
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 }
 

@@ -1,4 +1,20 @@
-export type TaskStatus = 'pending' | 'queued' | 'processing' | 'completed' | 'failed' | 'retrying' | 'cancelled';
+export type TaskStatus = 
+  | 'pending' 
+  | 'queued' 
+  | 'processing' 
+  | 'completed' 
+  | 'failed' 
+  | 'retrying' 
+  | 'cancelled'
+  | 'upload_failed';
+
+export type UploadErrorCode = 
+  | 'invalid_type'
+  | 'file_too_large'
+  | 'file_too_small'
+  | 'read_error'
+  | 'save_error'
+  | 'internal_error';
 
 export type TaskPriority = 0 | 50 | 100;
 
@@ -46,6 +62,25 @@ export interface Task {
   metadata: Record<string, string>;
   created_at: string;
   updated_at: string;
+}
+
+export interface FileUploadResult {
+  file_name: string;
+  file_size: number;
+  success: boolean;
+  resource_id?: string;
+  task_id?: string;
+  error_code?: UploadErrorCode;
+  error_message?: string;
+}
+
+export interface UploadResultData {
+  resources: Resource[];
+  tasks: Task[];
+  results: FileUploadResult[];
+  total: number;
+  success_count: number;
+  failed_count: number;
 }
 
 export interface VideoSettings {

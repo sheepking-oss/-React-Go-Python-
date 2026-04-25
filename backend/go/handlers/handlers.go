@@ -102,24 +102,144 @@ func (h *Handler) UploadFile(c *gin.Context) {
 
 	var resources []*models.Resource
 	var tasks []*models.Task
+	var results []*models.FileUploadResult
 
 	for _, fileHeader := range files {
-		resource, task, err := h.processUploadedFile(fileHeader, template, tags)
-		if err != nil {
-			h.logger.Error("Failed to process file", zap.String("filename", fileHeader.Filename), zap.Error(err))
+		result := &models.FileUploadResult{
+			FileName: fileHeader.Filename,
+			FileSize: fileHeader.Size,
+			Success:  false,
+		}
+
+		validationError, validationCode := h.validateUploadedFile(fileHeader)
+		if validationError != nil {
+			result.ErrorCode = validationCode
+			result.ErrorMessage = validationError.Error()
+
+			failedTask := models.NewFailedUploadTask(
+				fileHeader.Filename,
+				validationCode,
+				validationError.Error(),
+				template,
+			)
+			if err := h.store.CreateTask(failedTask); err == nil {
+				result.TaskID = failedTask.ID
+				tasks = append(tasks, failedTask)
+			}
+
+			h.logger.Warn("File validation failed",
+				zap.String("filename", fileHeader.Filename),
+				zap.String("error_code", string(validationCode)),
+				zap.String("error", validationError.Error()))
+
+			results = append(results, result)
 			continue
 		}
+
+		resource, task, err := h.processUploadedFile(fileHeader, template, tags)
+		if err != nil {
+			result.ErrorCode = models.UploadErrorCodeSaveError
+			result.ErrorMessage = "Failed to save file: " + err.Error()
+
+			failedTask := models.NewFailedUploadTask(
+				fileHeader.Filename,
+				models.UploadErrorCodeSaveError,
+				err.Error(),
+				template,
+			)
+			if err := h.store.CreateTask(failedTask); err == nil {
+				result.TaskID = failedTask.ID
+				tasks = append(tasks, failedTask)
+			}
+
+			h.logger.Error("Failed to process file",
+				zap.String("filename", fileHeader.Filename),
+				zap.Error(err))
+
+			results = append(results, result)
+			continue
+		}
+
+		result.Success = true
+		result.ResourceID = resource.ID
+		result.TaskID = task.ID
 		resources = append(resources, resource)
 		tasks = append(tasks, task)
+		results = append(results, result)
+
+		h.logger.Info("File uploaded successfully",
+			zap.String("resource_id", resource.ID),
+			zap.String("task_id", task.ID),
+			zap.String("filename", resource.Name))
+	}
+
+	successCount := 0
+	for _, r := range results {
+		if r.Success {
+			successCount++
+		}
 	}
 
 	c.JSON(http.StatusOK, APIResponse{
-		Success: true,
+		Success: successCount == len(results),
 		Data: map[string]interface{}{
-			"resources": resources,
-			"tasks":     tasks,
+			"resources":     resources,
+			"tasks":         tasks,
+			"results":       results,
+			"total":         len(results),
+			"success_count": successCount,
+			"failed_count":  len(results) - successCount,
 		},
 	})
+}
+
+func (h *Handler) validateUploadedFile(fileHeader *multipart.FileHeader) (error, models.UploadErrorCode) {
+	maxSizeMB := h.config.Server.MaxUploadMB
+	maxSizeBytes := maxSizeMB * 1024 * 1024
+
+	if fileHeader.Size > maxSizeBytes {
+		return &UploadValidationError{
+			Message: "文件过大，最大允许 " + strconv.FormatInt(maxSizeMB, 10) + "GB",
+			Code:    models.UploadErrorCodeFileTooLarge,
+		}, models.UploadErrorCodeFileTooLarge
+	}
+
+	if fileHeader.Size == 0 {
+		return &UploadValidationError{
+			Message: "文件为空",
+			Code:    models.UploadErrorCodeFileTooSmall,
+		}, models.UploadErrorCodeFileTooSmall
+	}
+
+	ext := strings.ToLower(filepath.Ext(fileHeader.Filename))
+	validExtensions := map[string]bool{
+		".mp4":  true,
+		".avi":  true,
+		".mkv":  true,
+		".mov":  true,
+		".wmv":  true,
+		".flv":  true,
+		".webm": true,
+		".m4v":  true,
+	}
+
+	if !validExtensions[ext] {
+		return &UploadValidationError{
+			Message: "不支持的文件格式 (" + ext + ")，仅支持: MP4, AVI, MKV, MOV, WMV, FLV, WebM",
+			Code:    models.UploadErrorCodeInvalidType,
+		}, models.UploadErrorCodeInvalidType
+	}
+
+	return nil, ""
+}
+
+type UploadValidationError struct {
+	Message string
+	Code    models.UploadErrorCode
+}
+
+func (e *UploadValidationError) Error() string {
+	return e.Message
 }
 
 func (h *Handler) processUploadedFile(fileHeader *multipart.FileHeader, template *models.TranscodeTemplate, tags []string) (*models.Resource, *models.Task, error) {

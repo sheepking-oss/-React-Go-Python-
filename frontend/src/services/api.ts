@@ -6,14 +6,15 @@ import type {
   LogEntry, 
   QueueStats,
   ApiResponse,
-  PaginatedResponse
+  PaginatedResponse,
+  UploadResultData
 } from '@/types';
 
 const API_BASE = '/api/v1';
 
 const api = axios.create({
   baseURL: API_BASE,
-  timeout: 30000,
+  timeout: 120000,
   headers: {
     'Content-Type': 'application/json',
   },
@@ -47,7 +48,7 @@ export const uploadApi = {
       formData.append('tags', tags.join(','));
     }
 
-    return api.post<ApiResponse<{ resources: Resource[]; tasks: Task[] }>>(
+    return api.post<ApiResponse<UploadResultData>>(
       '/upload',
       formData,
       {
